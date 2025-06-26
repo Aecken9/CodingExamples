@@ -1,0 +1,322 @@
+create or replace view SOUTHERN_DISTILLING.STAGING.VIP_MASTER_OUTLET_XREF(
+	VIP_OUTLET_ID,
+	ACCOUNT_NAME,
+	ADDRESS,
+	CITY,
+	STATE,
+	ZIP_CODE,
+	COUNTY,
+	PARENT_OWNER,
+	SUB_DIVISION_OWNER,
+	IMMEDIATE_OWNER,
+	CHAIN_INDICATOR,
+	FRANCHISE_INDICATOR,
+	CHANNEL,
+	SUB_CHANNEL,
+	CUISINE_TYPE,
+	PREMISE_TYPE,
+	STORE_STATUS,
+	SELLS_BEER,
+	SELLS_WINE,
+	SELLS_SPIRITS,
+	LATITUDE,
+	LONGITUDE
+) as(
+
+/* This script is used to stage all necessary item cross reference data to be
+   joined to the sales facts tables by the primary key of vip_outlet_id. */
+
+/* We first select a distinct list of all necessary vip_outlet_id - specific cross
+   reference detail. */
+
+with
+view_a as(
+       select distinct coalesce(upper(trim(vpid)), 'N/A') as vip_outlet_id,
+                       coalesce(upper(trim(vpdba)), 'N/A') as account_name,
+                       coalesce(upper(trim(vpaddr)), 'N/A') as address,
+                       coalesce(upper(trim(vpcity)), 'N/A') as city,
+                       coalesce(upper(trim(vpstat)), 'N/A') as state,
+                       coalesce(upper(trim(left(vpzip9, 5))), 'N/A') as zip_code,
+                       coalesce(upper(trim(vpcoun)), 'N/A') as county,
+                       coalesce(upper(trim(vpchn)), 'N/A') as chain_id,
+                       coalesce(upper(trim(vpiocode)), 'N/A') as parent_owner_id,
+                       coalesce(upper(trim(vpcsts)), 'N/A') as chain_indicator,
+                       coalesce(upper(trim(vpfranind)), 'N/A') as franchise_indicator,
+                       coalesce(upper(trim(vpcot)), 'N/A') as channel_id,
+                       coalesce(upper(trim(vpsubchnl)), 'N/A') as sub_channel_id,
+                       coalesce(upper(trim(vpcustyp)), '00') as cuisine_type_id,
+                       coalesce(upper(trim(vpprem)), 'N/A') as premise_type,
+                       coalesce(upper(trim(vpstatus)), 'N/A') as store_status,
+                       coalesce(upper(trim(vpmalt)), 'N/A') as sells_beer,
+                       coalesce(upper(trim(vpwine)), 'N/A') as sells_wine,
+                       coalesce(upper(trim(vpspirits)), 'N/A') as sells_spirits,
+                       coalesce(upper(trim(vplat)), 'N/A') as latitude,
+                       coalesce(upper(trim(vplong)), 'N/A') as longitude
+       from southern_distilling.raw.vip_vipout),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each vip_outlet_id. This ensures that we have a 
+   clean left join against the sales fact table. */
+                    
+view_b as(
+       select vip_outlet_id,
+              account_name,
+              address,
+              city,
+              state,
+              zip_code,
+              county,
+              chain_id,
+              parent_owner_id,
+              case when chain_indicator = 'I' then 'INDEPENDENT'
+                   when chain_indicator = 'C' then 'CHAIN' else 'OTHER' end as chain_indicator,
+              case when franchise_indicator = 'Y' then 'FRANCHISED' else 'CORPORATE' end as franchise_indicator,
+              channel_id,
+              sub_channel_id,
+              cuisine_type_id,
+              case when premise_type = 'O' then 'ON PREMISE'
+                   when premise_type = 'F' then 'OFF PREMISE' else 'OTHER' end as premise_type,
+              case when store_status = 'I' then 'INACTIVE'
+                   when store_status = 'A' then 'ACTIVE'
+                   when store_status = 'F' then 'FUTURE' else 'OTHER' end as store_status,
+              case when sells_beer = 'Y' then 'YES'
+                   when sells_beer = 'N' then 'NO' else 'OTHER' end as sells_beer,
+              case when sells_wine = 'Y' then 'YES'
+                   when sells_wine = 'N' then 'NO' else 'OTHER' end as sells_wine,
+              case when sells_spirits = 'Y' then 'YES'
+                   when sells_spirits = 'N' then 'NO' else 'OTHER' end as sells_spirits,
+              latitude,
+              longitude,
+              row_number() over (partition by vip_outlet_id order by vip_outlet_id) as row_count
+       from view_a),
+
+view_c as(
+       select vip_outlet_id,
+              account_name,
+              address,
+              city,
+              state,
+              zip_code,
+              county,
+              chain_id,
+              parent_owner_id,
+              chain_indicator,
+              franchise_indicator,
+              channel_id,
+              sub_channel_id,
+              cuisine_type_id,
+              premise_type,
+              store_status,
+              sells_beer,
+              sells_wine,
+              sells_spirits,
+              latitude,
+              longitude
+       from view_b
+       where row_count = 1),
+
+/* We then select a distinct list of all necessary chain_id - specific cross
+   reference detail. */
+
+view_d as(
+       select distinct coalesce(upper(trim(vpchn)), 'N/A') as chain_id,
+                       coalesce(upper(trim(vpchnm)), 'N/A') as immediate_owner
+       from southern_distilling.raw.vip_vochain 
+       where coalesce(upper(trim(recordtype)), 'N/A') = 'DETAIL'),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each chain_id. This ensures that we have a 
+   clean left join against the chain_id in the vipout file (view_c). */
+
+view_e as(
+       select chain_id,
+              immediate_owner,
+              row_number() over (partition by chain_id order by chain_id) as row_count
+       from view_d),
+
+view_f as(
+       select chain_id,
+              immediate_owner
+       from view_e
+       where row_count = 1),
+
+/* We then select a distinct list of all necessary parent_owner_id - specific cross
+   reference detail. */
+       
+view_g as(
+       select distinct coalesce(upper(trim(vpochnhcd1)), 'N/A') as parent_owner_id,
+                       coalesce(upper(trim(vpochnhnm4)), 'N/A') as parent_owner,
+                       coalesce(upper(trim(vpochnhnm3)), 'N/A') as sub_division_owner
+       from southern_distilling.raw.vip_voownhier
+       where coalesce(upper(trim(recordtype)), 'N/A') = 'DETAIL'),
+       
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each parent_owner_id. This ensures that we have a 
+   clean left join against the parent_owner_id in the vipout file (view_c). */
+   
+view_h as(
+       select parent_owner_id,
+              parent_owner,
+              sub_division_owner,
+              row_number() over (partition by parent_owner_id order by parent_owner_id) as row_count
+       from view_g),
+
+view_i as(
+       select parent_owner_id,
+              parent_owner,
+              sub_division_owner
+       from view_h
+       where row_count = 1),
+
+/* We then select a distinct list of all necessary channel_id and 
+   sub_channel_id - specific cross reference detail. */
+
+view_j as(
+       select distinct coalesce(upper(trim(ctcot)), 'N/A') as channel_id,
+                       coalesce(upper(trim(ctcotdesc)), 'N/A') as channel,
+                       coalesce(upper(trim(ctscot)), 'N/A') as sub_channel_id,
+                       coalesce(upper(trim(ctscotdesc)), 'N/A') as sub_channel
+       from southern_distilling.raw.vip_vocot
+       where coalesce(upper(trim(recordtype)), 'N/A') = 'DETAIL'),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per unique channel_id and sub_channel_id combination. 
+   This ensures that we have a clean left join against the channel_id and sub_channel_id
+   in the vipout file (view_c). */
+
+view_k as(
+       select channel_id,
+              channel,
+              sub_channel_id,
+              sub_channel,
+              row_number() over (partition by channel_id, sub_channel_id 
+                                 order by channel_id, sub_channel_id) as row_count
+       from view_j),
+
+view_l as(
+       select channel_id,
+              channel,
+              sub_channel_id,
+              sub_channel
+       from view_k
+       where row_count = 1),
+
+/* We then select a distinct list of all necessary cuisine_type_id - specific 
+   cross reference detail. */
+
+view_m as(
+       select distinct coalesce(upper(trim(code)), 'N/A') as cuisine_type_id,
+                       coalesce(upper(trim(desc)), 'N/A') as cuisine_type
+       from southern_distilling.raw.vip_vipvalue
+       where coalesce(upper(trim(field)), 'N/A') = 'VPCUSTYP'),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each cuisine_type_id. This ensures that we have a 
+   clean left join against the cuisine_type_id in the vipout file (view_c). */
+
+view_n as(
+       select cuisine_type_id,
+              cuisine_type,
+              row_number() over (partition by cuisine_type_id order by cuisine_type_id) as row_count
+       from view_m),
+
+view_o as(
+       select cuisine_type_id,
+              cuisine_type
+       from view_n
+       where row_count = 1),
+
+/* We then join all previously staged detail to the vipout detail in view_c
+   to create the final master outler data view. */
+
+view_p as(
+       select view_c.vip_outlet_id as vip_outlet_id,
+              view_c.account_name as account_name,
+              view_c.address as address,
+              view_c.city as city,
+              view_c.state as state,
+              view_c.zip_code as zip_code,
+              view_c.county as county,
+              coalesce(view_f.immediate_owner, 'N/A') as immediate_owner,
+              coalesce(view_i.parent_owner, 'N/A') as parent_owner,
+              coalesce(view_i.sub_division_owner, 'N/A') as sub_division_owner,
+              view_c.chain_indicator as chain_indicator,
+              view_c.franchise_indicator as franchise_indicator,
+              coalesce(view_l.channel, 'N/A') as channel,
+              coalesce(view_l.sub_channel, 'N/A') as sub_channel,
+              coalesce(view_o.cuisine_type, 'N/A') as cuisine_type,
+              view_c.premise_type as premise_type,
+              view_c.store_status as store_status,
+              view_c.sells_beer as sells_beer,
+              view_c.sells_wine as sells_wine,
+              view_c.sells_spirits as sells_spirits,
+              view_c.latitude as latitude,
+              view_c.longitude as longitude
+       from view_c
+       left join view_f on view_c.chain_id = view_f.chain_id
+       left join view_i on view_c.parent_owner_id = view_i.parent_owner_id
+       left join view_l on view_c.channel_id = view_l.channel_id
+                        and view_c.sub_channel_id = view_l.sub_channel_id
+       left join view_o on view_c.cuisine_type_id = view_o.cuisine_type_id),
+
+/* We then select a distinct list of all vip_outlet_id - specific 
+   cross reference detail. */
+
+view_q as(
+       select distinct vip_outlet_id,
+                       account_name,
+                       address,
+                       city,
+                       state,
+                       zip_code,
+                       county,
+                       parent_owner,
+                       sub_division_owner,
+                       immediate_owner,
+                       chain_indicator,
+                       franchise_indicator,
+                       channel,
+                       sub_channel,
+                       cuisine_type,
+                       premise_type,
+                       store_status,
+                       sells_beer,
+                       sells_wine,
+                       sells_spirits,
+                       latitude,
+                       longitude,
+                       row_number() over (partition by vip_outlet_id order by vip_outlet_id) as row_count
+       from view_p),
+
+/* Once we've created a distinct list of all final detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each vip_outlet_id. This ensures that we have a 
+   clean left join against the sales fact table. */
+       
+view_r as(
+       select vip_outlet_id,
+              account_name,
+              address,
+              city,
+              state,
+              zip_code,
+              county,
+              parent_owner,
+              sub_division_owner,
+              immediate_owner,
+              chain_indicator,
+              franchise_indicator,
+              channel,
+              sub_channel,
+              cuisine_type,
+              premise_type,
+              store_status,
+              sells_beer,
+              sells_wine,
+              sells_spirits,
+              latitude,
+              longitude
+       from view_q
+       where row_count = 1)
+
+select * from view_r
+order by vip_outlet_id);
