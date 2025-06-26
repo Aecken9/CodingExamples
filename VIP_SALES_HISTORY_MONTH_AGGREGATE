@@ -1,0 +1,220 @@
+create or replace view SOUTHERN_DISTILLING.STAGING.VIP_SALES_HISTORY_MONTH_AGGREGATE(
+	SUPPLIER,
+	VIP_OUTLET_ID,
+	DISTRIBUTOR_ID,
+	ITEM_ID,
+	POD_ID,
+	YEAR,
+	MONTH,
+	MONTH_ENDING_DATE,
+	"AGGREGATE",
+	BOTTLE_VOLUME,
+	CASE_VOLUME_PHYSICAL,
+	CASE_VOLUME_9L,
+	FRONTLINE_SALES,
+	NET_SALES
+) as(
+
+/* This script is used to stage all necessary sales facts from the history / history restatement 
+   file to be appended to the daily sales facts staged in a separate staging codebase. These fact 
+   files are then joined to the vip_outlet_id cross reference, item_id cross reference, and 
+   distributor_id cross reference mappings. */
+
+/* We first select and stage all essential raw sales data fields */
+
+with
+view_a as(
+       select 'SOUTHERN DISTILLING' as supplier,
+              coalesce(upper(trim(distid)), 'N/A') as distributor_id,
+              coalesce(upper(trim(acctnbr)), 'N/A') as customer_id,
+              coalesce(upper(trim(suppitem)), 'N/A') as item_id,
+              case when coalesce(upper(trim(uom)), 'N/A') = 'B' then 'BOTTLE'
+                   when coalesce(upper(trim(uom)), 'N/A') = 'C' then 'CASE' else 'OTHER' end as unit_type,
+              year(to_date(invoicedate, 'yyyymmdd')) as year,
+              month(to_date(invoicedate, 'yyyymmdd')) as month,
+              last_day(to_date(invoicedate, 'yyyymmdd')) as month_ending_date,
+              to_date(invoicedate,'yyyymmdd') as invoice_date,
+              coalesce(cast(qty as float), 0) as qty,
+              coalesce(cast(front as float), 0) as frontline_price,
+              coalesce(cast(netprice4 as float), 0) as net_price
+       from southern_distilling.raw.vip_slsfx
+       where to_date(invoicedate, 'yyyymmdd') < '2024-09-01'), /* remove hard coded values */
+
+/* We then select a distinct list of the vip_outlet_ids specific to a unique combination
+   of the distributor_id and customer_id fields. These two fields will then be referenced to
+   join a unique vip_outlet_id to each distributor_id and customer_id combination available in 
+   view_a. */
+
+view_b as(
+       select distinct coalesce(upper(trim(vpid)), 'N/A') as vip_outlet_id,
+                       coalesce(upper(trim(distid)), 'N/A') as distributor_id,
+                       coalesce(upper(trim(rscust)), 'N/A') as customer_id
+       from southern_distilling.raw.vip_voxref),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each distributor_id and customer_id combination. 
+   This ensures that we have a clean left join against the distributor_id and customer_id
+   fields referenced in view_a */
+
+view_c as(
+       select vip_outlet_id,
+              distributor_id,
+              customer_id,
+              row_number() over (partition by distributor_id, customer_id
+                                 order by distributor_id, customer_id) as row_count
+       from view_b),
+
+view_d as(
+       select vip_outlet_id,
+              distributor_id,
+              customer_id
+       from view_c
+       where row_count = 1),
+
+/* We then select a distinct list of item_id-specific details from the raw item cross reference file. 
+   This information will be joined to the sales data we've staged in view_a by item_id. This information 
+   is necessary to accurately calculate physical case volume, 9L case volume, frontline sales and 
+   net sales, which will be done in later steps throughout this script. */
+
+view_e as(
+       select distinct coalesce(upper(trim(supplieritem)), 'N/A') as item_id,
+                       coalesce(cast(sellingunits as float), 0) as pack_size,
+                       coalesce(cast(volofunit as float), 0) as unit_volume_size,
+                       coalesce(upper(trim(voluom)), 'N/A') as unit_volume_measure
+       from southern_distilling.raw.vip_itm2da),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each item_id. This ensures that we have a clean 
+   left join against the item_id field referenced in view_a */
+
+view_f as(
+       select item_id,
+              pack_size,
+              unit_volume_size,
+              unit_volume_measure,
+              row_number() over (partition by item_id order by item_id) as row_count
+       from view_e),
+
+view_g as(
+       select item_id,
+              pack_size,
+              unit_volume_size,
+              unit_volume_measure
+       from view_f
+       where row_count = 1),
+
+/* Now that we've identified and staged all necessary mappings we join the sales data
+   and mappings into one cohesive view. */
+
+view_h as(
+       select view_a.supplier as supplier,
+              coalesce(view_d.vip_outlet_id, 'N/A') as vip_outlet_id,
+              view_a.distributor_id as distributor_id,
+              view_a.customer_id as customer_id,
+              view_a.item_id as item_id,
+              coalesce(view_g.pack_size, 0) as pack_size,
+              coalesce(view_g.unit_volume_size, 0) as unit_volume_size,
+              coalesce(view_g.unit_volume_measure, 'N/A') as unit_volume_measure,
+              view_a.unit_type as unit_type,
+              view_a.year as year,
+              view_a.month as month,
+              view_a.month_ending_date as month_ending_date,
+              view_a.invoice_date as invoice_date,
+              view_a.qty as qty,
+              view_a.frontline_price as frontline_price,
+              view_a.net_price as net_price
+       from view_a
+       left join view_d on view_a.distributor_id = view_d.distributor_id
+                        and view_a.customer_id = view_d.customer_id
+       left join view_g on view_a.item_id = view_g.item_id),
+
+/* We apply case and bottle volume calculation logic to accurately calculate
+   all bottle volume and physical case volume. We also create a unit_volume_conversion
+   factor which will be used in a following step to calculate 9L case volume. */
+
+view_i as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id,
+              item_id,
+              pack_size,
+              unit_type,
+              case when unit_volume_measure = 'ML' then coalesce(unit_volume_size/9000, 0) 
+                   else 0 end as unit_volume_conversion, 
+              year,
+              month,
+              month_ending_date,
+              invoice_date,
+              case when unit_type = 'BOTTLE' then qty else (qty * pack_size) end as bottle_volume,
+              case when unit_type = 'CASE' then qty else (qty / pack_size) end as case_volume_physical,
+              frontline_price,
+              net_price
+       from view_h),
+
+/* We apply frontline sales and net sales calculation logic to accurately calculate
+   all frontline sales and net sales. We create a POD ID field to accurately identify
+   unique PODs. In addition, we apply the unit_volume_conversion logic to accurately 
+   calculate 9L case volume. */
+
+view_j as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id,
+              item_id,
+              concat(vip_outlet_id, ' - ', item_id) as pod_id,
+              year,
+              month,
+              month_ending_date,
+              invoice_date,
+              '1 MTH' as aggregate,
+              bottle_volume,
+              case_volume_physical,
+              coalesce(bottle_volume * unit_volume_conversion, 0) as case_volume_9L,
+              case when unit_type = 'BOTTLE' then coalesce(bottle_volume * frontline_price, 0) 
+                                             else coalesce(case_volume_physical * frontline_price, 0) end as frontline_sales,
+              case when unit_type = 'BOTTLE' then coalesce(bottle_volume * net_price, 0) 
+                                             else coalesce(case_volume_physical * net_price, 0) end as net_sales
+       from view_i),
+
+/* We have now calculated all bottle volume, physical case volume, 9L case volume,
+   frontline sales, and net sales. However, we need to apply one last step to aggregate
+   all sales by month_ending_date. */
+
+view_k as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id,
+              item_id,
+              pod_id,
+              year,
+              month,
+              month_ending_date,
+              aggregate,
+              sum(bottle_volume) as bottle_volume, 
+              sum(case_volume_physical) as case_volume_physical,
+              sum(case_volume_9L) as case_volume_9L,
+              sum(frontline_sales) as frontline_sales,
+              sum(net_sales) as net_sales
+       from view_j
+       group by supplier,
+                vip_outlet_id,
+                distributor_id,
+                item_id,
+                pod_id,
+                aggregate,
+                year,
+                month,
+                month_ending_date
+       order by supplier,
+                vip_outlet_id,
+                distributor_id,
+                item_id,
+                pod_id,
+                aggregate,
+                year,
+                month,
+                month_ending_date)
+
+/* Once all data is aggregated, we select the final staged view */
+
+select * from view_k);
