@@ -1,0 +1,44 @@
+create or replace view SOUTHERN_DISTILLING.STAGING.VIP_DISTRIBUTOR_XREF(
+	DISTRIBUTOR_ID,
+	DISTRIBUTOR_NAME,
+	DISTRIBUTOR_STATE,
+	DISTRIBUTOR_DIVISION,
+	DISTRIBUTOR_AREA
+) as(
+
+/* This script is used to stage all necessary distributor cross reference data to be
+   joined to the sales facts tables by the primary key of distributor_id. */
+
+/* We first select a distinct list of all necessary distributor_id - specific cross
+   reference detail. */
+   
+with
+view_a as(
+       select distinct coalesce(upper(trim("DISTRIBUTOR ID")), 'N/A') as distributor_id,
+                       coalesce(upper(trim("DISTRIBUTOR NAME")), 'N/A') as distributor_name,
+                       coalesce(upper(trim(state)), 'N/A') as distributor_state,
+                       coalesce(upper(trim("DIVISION DESCRIPTION")), 'N/A') as distributor_division,
+                       coalesce(upper(trim("AREA DESCRIPTION")), 'N/A') as distributor_area
+       from southern_distilling.raw.vip_distda),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each distributor id. This ensures that we have a 
+   clean left join against the sales fact table. */
+       
+view_b as(
+       select distributor_id,
+              distributor_name,
+              distributor_state,
+              distributor_division,
+              distributor_area,
+              row_number() over (partition by distributor_id order by distributor_id) as row_count
+       from view_a)
+
+select distributor_id,
+       distributor_name,
+       distributor_state,
+       distributor_division,
+       distributor_area
+from view_b
+where row_count = 1
+order by distributor_id);
