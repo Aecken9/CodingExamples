@@ -1,0 +1,93 @@
+create or replace view SOUTHERN_DISTILLING.STAGING.VIP_ITEM_XREF(
+	SUPPLIER,
+	ITEM_ID,
+	CASE_SCC,
+	BOTTLE_UPC,
+	RETAIL_UPC,
+	ABV,
+	CATEGORY,
+	BRAND,
+	SIZE,
+	SKU,
+	ITEM_NAME,
+	PACK_SIZE,
+	UNIT_VOLUME_SIZE,
+	UNIT_VOLUME_MEASURE
+) as(
+
+/* This script is used to stage all necessary item cross reference data to be
+   joined to the sales facts tables by the primary key of item_id. */
+
+/* We first select a distinct list of all necessary item_id - specific cross
+   reference detail. */
+   
+with
+view_a as(
+       select distinct 'SOUTHERN DISTILLING' as supplier, /* remove hardcoding */
+                       coalesce(upper(trim(supplieritem)), 'N/A') as item_id,
+                       coalesce(upper(trim(casegtin)), 'N/A') as case_scc,
+                       coalesce(upper(trim(bottlegtin)), 'N/A') as bottle_upc,
+                       coalesce(upper(trim(retailgtin)), 'N/A') as retail_upc,
+                       coalesce(cast(alcoholpct as float), 0) as abv,
+                       coalesce(upper(trim(branddesc)), 'N/A') as brand,
+                       coalesce(upper(trim(desc)), 'N/A') as item_name,
+                       coalesce(cast(volofunit as float), 0) as unit_volume_size,
+                       coalesce(upper(trim(voluom)), 'N/A') as unit_volume_measure,
+                       coalesce(cast(sellingunits as float), 0) as pack_size,
+                       coalesce(upper(trim(genericcat3)), 'N/A') as category /* remove hardcoding on genericcat */
+       from southern_distilling.raw.vip_itm2da),
+
+/* Once we've created a distinct list of all detail, we put a final mechanism in place to
+   ensure there is one unique line of detail per each item id. This ensures that we have a 
+   clean left join against the sales fact table. We then build the size and sku fields to
+   complete this script. */
+       
+view_b as(
+       select supplier,
+              item_id,
+              case_scc,
+              bottle_upc,
+              retail_upc,
+              abv,
+              brand,
+              item_name,
+              unit_volume_size,
+              unit_volume_measure,
+              pack_size,
+              category,
+              row_number() over (partition by item_id order by item_id) as row_count
+       from view_a),
+
+view_c as(
+       select supplier,
+              item_id,
+              case_scc,
+              bottle_upc,
+              retail_upc,
+              abv,
+              brand,
+              item_name,
+              unit_volume_size,
+              unit_volume_measure,
+              concat(unit_volume_size, ' ', unit_volume_measure) as size,
+              pack_size,
+              category
+       from view_b
+       where row_count = 1)
+
+select supplier,
+       item_id,
+       case_scc,
+       bottle_upc,
+       retail_upc,
+       abv,
+       category,
+       brand,
+       size,
+       coalesce(concat(brand, ' ', size), 'N/A') as sku,
+       item_name,
+       pack_size,
+       unit_volume_size,
+       unit_volume_measure
+from view_c
+order by item_id);
