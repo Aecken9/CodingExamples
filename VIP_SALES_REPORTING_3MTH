@@ -1,0 +1,189 @@
+create or replace view SOUTHERN_DISTILLING.STAGING.VIP_SALES_REPORTING_3MTH(
+	SUPPLIER,
+	VIP_OUTLET_ID,
+	DISTRIBUTOR_ID,
+	ITEM_ID,
+	POD_ID,
+	MONTH_ENDING_DATE,
+	YEAR,
+	MONTH,
+	"AGGREGATE",
+	BOTTLE_VOLUME,
+	BOTTLE_VOLUME_YAGO,
+	CASE_VOLUME_PHYSICAL,
+	CASE_VOLUME_PHYSICAL_YAGO,
+	CASE_VOLUME_9L,
+	CASE_VOLUME_9L_YAGO,
+	FRONTLINE_SALES,
+	FRONTLINE_SALES_YAGO,
+	NET_SALES,
+	NET_SALES_YAGO,
+	SALES_FLAG,
+	SALES_FLAG_YAGO
+) as(
+
+/* We first pull all necessary sales facts from the raw data set tables (both the historic
+   data - old, and new data coming in every day). We are using these fields to build
+   an aggregated sales facts table. */
+
+with 
+view_a as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id,
+              item_id,
+              pod_id,
+              year,
+              month,
+              month_ending_date,
+              '3 MTH' as aggregate,
+              bottle_volume,
+              case_volume_physical,
+              case_volume_9l,
+              frontline_sales,
+              net_sales
+       from southern_distilling.staging.vip_sales_daily_month_aggregate),
+
+/* We then need to create a shell table to fill in missing transaction weeks per each 
+   supplier, distributor_id, and pod_id. We do this because we will need all dates available 
+   in later steps when accurately calculating our rolling aggregated figures 
+   via window functions. */
+
+view_b as(
+       select distinct supplier,
+                       vip_outlet_id,
+                       distributor_id,
+                       item_id,
+                       pod_id
+       from view_a),
+
+view_c as(
+       select distinct month_ending_date,
+                       year,
+                       month,
+                       aggregate
+       from view_a),
+
+view_d as(
+       select * from view_b
+       cross join view_c),
+
+view_e as(
+       select view_d.supplier as supplier,
+              view_d.vip_outlet_id as vip_outlet_id,
+              view_d.distributor_id as distributor_id,
+              view_d.item_id as item_id,
+              view_d.pod_id as pod_id,
+              view_d.month_ending_date as month_ending_date,
+              view_d.year as year,
+              view_d.month as month,
+              view_d.aggregate as aggregate,
+              coalesce(view_a.bottle_volume, 0) as bottle_volume,
+              coalesce(view_a.case_volume_physical, 0) as case_volume_physical,
+              coalesce(view_a.case_volume_9l, 0) as case_volume_9l,
+              coalesce(frontline_sales, 0) as frontline_sales,
+              coalesce(net_sales, 0) as net_sales
+       from view_d
+       left join view_a
+       on view_d.supplier = view_a.supplier
+       and view_d.vip_outlet_id = view_a.vip_outlet_id
+       and view_d.distributor_id = view_a.distributor_id
+       and view_d.item_id = view_a.item_id
+       and view_d.pod_id = view_a.pod_id
+       and view_d.month_ending_date = view_a.month_ending_date
+       and view_d.aggregate = view_a.aggregate),
+
+/* Now that we have a month ending date and value available for each unique supplier,
+   distributor_id, and pod_id, we can now use window functions to calculate our 
+   rolling aggregates and values during same period last year. */
+
+/* Calculate 3 MTH rolling aggregate totals by supplier, distributor_id, and pod_id
+   ordered by month_ending_date. */
+
+view_f as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id, 
+              item_id,
+              pod_id,
+              month_ending_date,
+              year,
+              month,
+              aggregate,
+              coalesce(sum(bottle_volume) over (partition by supplier, distributor_id, pod_id 
+                                                order by supplier, distributor_id, pod_id, month_ending_date
+                                                rows between 2 preceding and current row), 0) as bottle_volume,
+              coalesce(sum(case_volume_physical) over (partition by supplier, distributor_id, pod_id 
+                                                       order by supplier, distributor_id, pod_id, month_ending_date
+                                                       rows between 2 preceding and current row), 0) as case_volume_physical,
+              coalesce(sum(case_volume_9l) over (partition by supplier, distributor_id, pod_id 
+                                                 order by supplier, distributor_id, pod_id, month_ending_date
+                                                 rows between 2 preceding and current row), 0) as case_volume_9l,
+              coalesce(sum(frontline_sales) over (partition by supplier, distributor_id, pod_id 
+                                                  order by supplier, distributor_id, pod_id, month_ending_date
+                                                  rows between 2 preceding and current row), 0) as frontline_sales,
+              coalesce(sum(net_sales) over (partition by supplier, distributor_id, pod_id 
+                                            order by supplier, distributor_id, pod_id, month_ending_date
+                                            rows between 2 preceding and current row), 0) as net_sales
+       from view_e),
+
+/* Calculate the 3 MTH aggregated value for same period last year (12 months ago). */
+
+view_g as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id, 
+              item_id,
+              pod_id,
+              month_ending_date,
+              year,
+              month,
+              aggregate,
+              bottle_volume, 
+              lag(bottle_volume, 12, 0) over (partition by supplier, distributor_id, pod_id 
+                                              order by supplier, distributor_id, pod_id, month_ending_date) as bottle_volume_yago,
+              case_volume_physical,
+              lag(case_volume_physical, 12, 0) over (partition by supplier, distributor_id, pod_id 
+                                                     order by supplier, distributor_id, pod_id, month_ending_date) as case_volume_physical_yago,
+              case_volume_9l,
+              lag(case_volume_9l, 12, 0) over (partition by supplier, distributor_id, pod_id 
+                                               order by supplier, distributor_id, pod_id, month_ending_date) as case_volume_9l_yago,
+              frontline_sales,
+              lag(frontline_sales, 12, 0) over (partition by supplier, distributor_id, pod_id 
+                                                order by supplier, distributor_id, pod_id, month_ending_date) as frontline_sales_yago,
+              net_sales,
+              lag(net_sales, 12, 0) over (partition by supplier, distributor_id, pod_id 
+                                          order by supplier, distributor_id, pod_id, month_ending_date) as net_sales_yago,
+       from view_f),
+
+/* Create the final view of data. At this point, we can now rid of any months in which 0 sales 
+   occurred as we have now accurately calculated all rolling aggregate and same period 
+   prior year figures. We also create sales flags to accurately identify accounts sold and
+   PODs. */
+
+view_h as(
+       select supplier,
+              vip_outlet_id,
+              distributor_id, 
+              item_id,
+              pod_id,
+              month_ending_date,
+              year,
+              month,
+              aggregate,
+              bottle_volume, 
+              bottle_volume_yago,
+              case_volume_physical,
+              case_volume_physical_yago,
+              case_volume_9l,
+              case_volume_9l_yago,
+              frontline_sales,
+              frontline_sales_yago,
+              net_sales,
+              net_sales_yago,
+              case when bottle_volume > 0 then 1 else 0 end as sales_flag,
+              case when bottle_volume_yago > 0 then 1 else 0 end as sales_flag_yago
+       from view_g
+       where bottle_volume <> 0 or bottle_volume_yago <> 0)
+
+select * from view_h);
